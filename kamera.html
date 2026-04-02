@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Inventory QR Scanner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr/dist/jsQR.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      background-color: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    #video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    .scan-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .scan-frame {
+      width: 260px;
+      height: 260px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 40px;
+      position: relative;
+      box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.6);
+    }
+
+    .scan-frame::before, .scan-frame::after, .scan-corner-1, .scan-corner-2 {
+      content: '';
+      position: absolute;
+      width: 40px;
+      height: 40px;
+      border-color: #fff;
+      border-style: solid;
+    }
+
+    .scan-frame::before { top: -2px; left: -2px; border-width: 6px 0 0 6px; border-radius: 20px 0 0 0; }
+    .scan-frame::after { top: -2px; right: -2px; border-width: 6px 6px 0 0; border-radius: 0 20px 0 0; }
+    .scan-corner-1 { bottom: -2px; left: -2px; border-width: 0 0 6px 6px; border-radius: 0 0 0 20px; }
+    .scan-corner-2 { bottom: -2px; right: -2px; border-width: 0 6px 6px 0; border-radius: 0 0 20px 0; }
+
+    @keyframes pulse-success {
+      0% { transform: scale(1); border-color: #fff; }
+      50% { transform: scale(1.05); border-color: #22c55e; }
+      100% { transform: scale(1); border-color: #22c55e; }
+    }
+
+    .frame-success {
+      animation: pulse-success 0.4s ease-out forwards;
+      border-color: #22c55e !important;
+    }
+
+    .slide-panel {
+      transform: translateY(100%);
+      transition: transform 0.5s cubic-bezier(0.32, 0.72, 0, 1);
+    }
+
+    .slide-panel.active {
+      transform: translateY(0);
+    }
+
+    .scanner-toast {
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .scanner-toast.visible {
+      opacity: 1;
+    }
+
+    #camera-blocker {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: #111;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- カメラ背面 -->
+  <video id="video" autoplay playsinline></video>
+
+  <!-- カメラ起動待機画面 -->
+  <div id="camera-blocker">
+    <div class="bg-white/10 p-6 rounded-full mb-6">
+      <i data-lucide="camera" class="w-12 h-12 text-white"></i>
+    </div>
+    <h1 class="text-white text-xl font-bold mb-4">カメラの使用許可が必要です</h1>
+    <p class="text-gray-400 mb-8 text-sm leading-relaxed">
+      QRコードをスキャンするために、カメラへのアクセスを許可してください。
+    </p>
+    <button id="start-camera-btn" class="bg-blue-600 text-white px-8 py-4 rounded-2xl font-bold active:scale-95 transition-transform">
+      カメラを起動する
+    </button>
+  </div>
+
+  <!-- 設定ボタン -->
+  <button id="settings-trigger" class="fixed top-6 right-6 z-50 p-3 bg-black/40 backdrop-blur-xl border border-white/20 rounded-full text-white active:scale-90 transition-transform">
+    <i data-lucide="settings"></i>
+  </button>
+
+  <!-- スキャンUIレイヤー -->
+  <div class="scan-overlay">
+    <div id="scan-frame" class="scan-frame">
+      <div class="scan-corner-1"></div>
+      <div class="scan-corner-2"></div>
+    </div>
+    
+    <div id="status-toast" class="scanner-toast mt-10 px-6 py-3 bg-white/10 backdrop-blur-md border border-white/20 rounded-full text-white text-sm font-medium">
+      QRコードをスキャン中...
+    </div>
+  </div>
+
+  <!-- タップヒント -->
+  <div id="tap-hint" class="fixed inset-0 z-20 flex items-end justify-center pb-28 pointer-events-none opacity-0 transition-opacity duration-300">
+    <div class="bg-green-600 text-white px-8 py-4 rounded-full shadow-2xl animate-bounce flex items-center gap-3 font-bold">
+      <i data-lucide="info"></i>
+      タップして商品情報を表示
+    </div>
+  </div>
+
+  <!-- データ表示パネル -->
+  <div id="info-panel" class="slide-panel fixed inset-0 z-40 flex items-end">
+    <div class="bg-white/10 backdrop-blur-xl w-full rounded-t-[40px] p-8 pb-12 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+      <div class="w-16 h-1.5 bg-white/30 rounded-full mx-auto mb-8"></div>
+      
+      <div class="flex items-center gap-4 mb-6">
+        <div class="bg-white/20 p-4 rounded-2xl text-white">
+          <i data-lucide="box"></i>
+        </div>
+        <div>
+          <p class="text-xs font-bold text-blue-300 uppercase tracking-widest">Inventory Data</p>
+          <h2 id="display-name" class="text-2xl font-black text-white leading-tight">商品名</h2>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 mb-8">
+        <div class="bg-white/10 p-4 rounded-2xl">
+          <p class="text-xs text-white/50 font-bold mb-1">整理番号</p>
+          <p id="display-number" class="text-white font-bold">-</p>
+        </div>
+        <div class="bg-white/10 p-4 rounded-2xl">
+          <p class="text-xs text-white/50 font-bold mb-1">メーカー</p>
+          <p id="display-maker" class="text-white font-bold">-</p>
+        </div>
+        <div class="bg-white/10 p-4 rounded-2xl">
+          <p class="text-xs text-white/50 font-bold mb-1">型式</p>
+          <p id="display-model" class="text-white font-bold">-</p>
+        </div>
+        <div class="bg-white/10 p-4 rounded-2xl">
+          <p class="text-xs text-white/50 font-bold mb-1">在庫数</p>
+          <p id="display-stock" class="text-white font-bold">-</p>
+        </div>
+        <div class="bg-white/10 p-4 rounded-2xl">
+          <p class="text-xs text-white/50 font-bold mb-1">単価</p>
+          <p id="display-price" class="text-2xl text-blue-300 font-black">-</p>
+        </div>
+        <div class="bg-white/10 p-4 rounded-2xl">
+          <p class="text-xs text-white/50 font-bold mb-1">単価更新日</p>
+          <p id="display-price-date" class="text-white font-bold">-</p>
+        </div>
+        <div class="bg-white/10 p-4 rounded-2xl col-span-2">
+          <p class="text-xs text-white/50 font-bold mb-1">対象URL</p>
+          <p id="display-url" class="text-xs text-white/50 break-all font-mono">-</p>
+        </div>
+      </div>
+
+      <button id="close-btn" class="w-full bg-white/20 text-white py-5 rounded-3xl font-bold text-lg active:scale-95 transition-transform">
+        閉じて次をスキャン
+      </button>
+    </div>
+  </div>
+
+  <!-- 設定・CSV管理パネル -->
+  <div id="settings-panel" class="slide-panel fixed inset-0 z-[60] flex items-end">
+    <div class="bg-gray-50 w-full h-[90vh] rounded-t-[40px] flex flex-col shadow-2xl">
+      <div class="p-8 pb-4 flex justify-between items-center">
+        <h2 class="text-2xl font-black text-gray-900">データ管理 (CSV)</h2>
+        <button id="settings-close" class="p-2 text-gray-400 hover:text-gray-900">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-8 pt-0">
+        <p class="text-gray-500 mb-6 text-sm">
+          URLをキーとして商品情報を管理します。
+        </p>
+        
+        <!-- 操作メニュー -->
+        <div class="space-y-4 mb-8">
+          <button id="download-template" class="w-full bg-white border border-gray-200 text-gray-700 py-4 rounded-2xl font-bold flex items-center justify-between px-6 shadow-sm active:scale-[0.98] transition-all">
+            <div class="flex items-center gap-3">
+              <i data-lucide="file-text" class="text-blue-500"></i>
+              <span>テンプレート作成</span>
+            </div>
+            <i data-lucide="chevron-right" class="w-4 h-4 text-gray-300"></i>
+          </button>
+
+          <label class="w-full bg-white border border-gray-200 text-gray-700 py-4 rounded-2xl font-bold flex items-center justify-between px-6 shadow-sm active:scale-[0.98] transition-all cursor-pointer">
+            <div class="flex items-center gap-3">
+              <i data-lucide="upload-cloud" class="text-green-500"></i>
+              <span>CSVインポート</span>
+            </div>
+            <i data-lucide="plus" class="w-4 h-4 text-gray-300"></i>
+            <input type="file" id="csv-upload" class="hidden" accept=".csv">
+          </label>
+
+          <button id="export-csv" class="w-full bg-white border border-gray-200 text-gray-700 py-4 rounded-2xl font-bold flex items-center justify-between px-6 shadow-sm active:scale-[0.98] transition-all">
+            <div class="flex items-center gap-3">
+              <i data-lucide="download" class="text-orange-500"></i>
+              <span>CSVエクスポート</span>
+            </div>
+            <i data-lucide="external-link" class="w-4 h-4 text-gray-300"></i>
+          </button>
+        </div>
+
+        <div class="bg-blue-50 rounded-2xl p-6 text-blue-800 text-sm mb-6">
+          <h3 class="font-bold flex items-center gap-2 mb-2">
+            <i data-lucide="info" class="w-4 h-4"></i> フォーマットについて
+          </h3>
+          <p class="leading-relaxed">
+            CSVの1行目はヘッダーとして以下の順序にしてください：<br>
+            <code class="bg-blue-100 px-1 rounded font-bold text-xs leading-6 block mt-2">URL,名称,型式,在庫,単価</code>
+          </p>
+        </div>
+
+        <button id="reset-all" class="w-full text-red-500 text-sm font-bold py-4">
+          全てのデータを削除
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- 初期設定 ---
+    const CSV_HEADER = ["URL", "整理番号", "メーカー", "名称", "型式", "在庫", "単価", "単価更新日"];
+    let dataMap = {}; // URL: { number, maker, name, model, stock, price, priceDate }
+    let lastQR = null;
+    let isPanelOpen = false;
+    let scanPaused = false;
+
+    const video = document.getElementById("video");
+    const scanFrame = document.getElementById("scan-frame");
+    const statusToast = document.getElementById("status-toast");
+    const tapHint = document.getElementById("tap-hint");
+    const infoPanel = document.getElementById("info-panel");
+    const settingsPanel = document.getElementById("settings-panel");
+    const cameraBlocker = document.getElementById("camera-blocker");
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    // --- データ処理 ---
+    function loadStorage() {
+      const saved = localStorage.getItem("inventory_data");
+      if (saved) dataMap = JSON.parse(saved);
+    }
+
+    function saveStorage() {
+      localStorage.setItem("inventory_data", JSON.stringify(dataMap));
+    }
+
+    // CSVをパースしてdataMapを更新
+    function parseCSV(text) {
+      const lines = text.split(/\r?\n/);
+      const newData = {};
+      
+      // 2行目から処理 (1行目はヘッダー)
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+        if (cols.length >= 8) {
+          const url = cols[0];
+          newData[url] = {
+            number: cols[1],
+            maker: cols[2],
+            name: cols[3],
+            model: cols[4],
+            stock: cols[5],
+            price: cols[6],
+            priceDate: cols[7]
+          };
+        }
+      }
+      return newData;
+    }
+
+    // テンプレートCSVを作成してダウンロード
+    function downloadTemplate() {
+      const csvContent = CSV_HEADER.join(",") + "\n" +
+                         "https://example.com/item001,001,メーカーA,サンプル商品A,MODEL-X,10,1500,2024-01-01\n" +
+                         "https://google.com,002,メーカーB,サンプル商品B,MODEL-Y,5,24800,2024-01-01";
+      
+      const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      link.setAttribute("download", "qr_inventory_template.csv");
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    // データをCSVとして書き出し
+    function exportToCSV() {
+      let csvContent = CSV_HEADER.join(",") + "\n";
+      Object.keys(dataMap).forEach(key => {
+        const item = dataMap[key];
+        csvContent += `"${key}","${item.number}","${item.maker}","${item.name}","${item.model}","${item.stock}","${item.price}","${item.priceDate}"\n`;
+      });
+      
+      const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      link.setAttribute("download", "inventory_export.csv");
+      link.click();
+    }
+
+    // --- カメラ制御 ---
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
+        });
+        video.srcObject = stream;
+        video.play();
+        cameraBlocker.style.display = "none";
+        requestAnimationFrame(tick);
+      } catch (err) {
+        alert("カメラへのアクセスを許可してください。設定から変更が必要な場合があります。");
+        console.error(err);
+      }
+    }
+
+    function tick() {
+      if (video.readyState === video.HAVE_ENOUGH_DATA && !scanPaused) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, canvas.width, canvas.height);
+
+        if (code && code.data !== "") {
+          if (lastQR !== code.data) {
+            handleQRDetected(code.data);
+          }
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+
+    function handleQRDetected(data) {
+      lastQR = data;
+      if (navigator.vibrate) navigator.vibrate(60);
+      
+      scanFrame.classList.add("frame-success");
+      statusToast.textContent = "スキャン成功！";
+      statusToast.classList.add("visible");
+      tapHint.style.opacity = "1";
+
+      setTimeout(() => scanFrame.classList.remove("frame-success"), 1000);
+    }
+
+    // --- UI操作 ---
+    function openPanel() {
+      if (!lastQR || isPanelOpen) return;
+      
+      const item = dataMap[lastQR];
+      
+      document.getElementById("display-url").textContent = lastQR;
+      if (item) {
+        document.getElementById("display-number").textContent = item.number;
+        document.getElementById("display-maker").textContent = item.maker;
+        document.getElementById("display-name").textContent = item.name;
+        document.getElementById("display-model").textContent = item.model;
+        document.getElementById("display-stock").textContent = item.stock;
+        document.getElementById("display-price").textContent = `¥${Number(item.price).toLocaleString()}`;
+        document.getElementById("display-price-date").textContent = item.priceDate;
+      } else {
+        document.getElementById("display-number").textContent = "-";
+        document.getElementById("display-maker").textContent = "-";
+        document.getElementById("display-name").textContent = "未登録";
+        document.getElementById("display-model").textContent = "-";
+        document.getElementById("display-stock").textContent = "-";
+        document.getElementById("display-price").textContent = "-";
+        document.getElementById("display-price-date").textContent = "-";
+      }
+
+      infoPanel.classList.add("active");
+      isPanelOpen = true;
+      scanPaused = true;
+      tapHint.style.opacity = "0";
+    }
+
+    function closePanel() {
+      infoPanel.classList.remove("active");
+      isPanelOpen = false;
+      setTimeout(() => {
+        lastQR = null;
+        scanPaused = false;
+        statusToast.classList.remove("visible");
+      }, 400);
+    }
+
+    // --- イベントリスナー ---
+    document.getElementById("start-camera-btn").addEventListener("click", startCamera);
+
+    document.body.addEventListener("touchstart", (e) => {
+      if (isPanelOpen || settingsPanel.classList.contains("active")) return;
+      if (lastQR) openPanel();
+    });
+
+    document.getElementById("close-btn").addEventListener("click", closePanel);
+    document.getElementById("settings-trigger").addEventListener("click", () => {
+      settingsPanel.classList.add("active");
+      scanPaused = true;
+    });
+    document.getElementById("settings-close").addEventListener("click", () => {
+      settingsPanel.classList.remove("active");
+      if (!isPanelOpen) scanPaused = false;
+    });
+
+    document.getElementById("download-template").addEventListener("click", downloadTemplate);
+    document.getElementById("export-csv").addEventListener("click", exportToCSV);
+
+    document.getElementById("csv-upload").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const text = event.target.result;
+        const imported = parseCSV(text);
+        if (Object.keys(imported).length > 0) {
+          dataMap = imported;
+          saveStorage();
+          alert(`${Object.keys(imported).length}件のデータを読み込みました。`);
+        } else {
+          alert("CSVの形式が正しくないか、データがありません。");
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    document.getElementById("reset-all").addEventListener("click", () => {
+      if(confirm("全てのデータを消去しますか？")) {
+        dataMap = {};
+        saveStorage();
+        alert("削除しました。");
+      }
+    });
+
+    window.onload = () => {
+      lucide.createIcons();
+      loadStorage();
+    };
+  </script>
+</body>
+</html>
